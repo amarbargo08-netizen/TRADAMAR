@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import mplfinance as mpf
 from scipy.stats import linregress
 from scipy.signal import argrelextrema
 
@@ -321,79 +320,70 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
     prices = df["Close"].values
     highs  = df["High"].values
     lows   = df["Low"].values
+    opens  = df["Open"].values
+    closes = df["Close"].values
     n      = len(prices)
 
     zoom_start = max(0, n - zoom)
-    df_zoom    = df.iloc[zoom_start:]
-
     bg_color   = "#0a0f2c" if dark else "#f0f4ff"
     text_color = "white"   if dark else "#0a0f2c"
-    edge_color = "#1a2a5e" if dark else "#cccccc"
+    grid_color = "#1a2a5e" if dark else "#cccccc"
 
-    mc = mpf.make_marketcolors(
-        up     = "#00ff88",
-        down   = "#ff4444",
-        edge   = "inherit",
-        wick   = "inherit",
-        volume = {"up": "#00ff88", "down": "#ff4444"}
-    )
-    style = mpf.make_mpf_style(
-        marketcolors = mc,
-        facecolor    = bg_color,
-        edgecolor    = edge_color,
-        figcolor     = bg_color,
-        gridcolor    = "#1a2a5e",
-        gridstyle    = "--",
-        gridaxis     = "both",
-        y_on_right   = True,
-        rc           = {
-            "axes.labelcolor" : text_color,
-            "xtick.color"     : text_color,
-            "ytick.color"     : text_color,
-        }
-    )
+    fig, ax = plt.subplots(figsize=(16, 7), facecolor=bg_color)
+    ax.set_facecolor(bg_color)
 
-    add_plots = []
+    # --- BOUGIES JAPONAISES ---
+    for i in range(zoom_start, n):
+        x     = i - zoom_start
+        op    = opens[i]
+        cl    = closes[i]
+        hi    = highs[i]
+        lo    = lows[i]
+        color = "#00ff88" if cl >= op else "#ff4444"
+
+        # Mèche
+        ax.plot([x, x], [lo, hi], color=color, linewidth=0.8, zorder=2)
+
+        # Corps
+        body_bottom = min(op, cl)
+        body_height = abs(cl - op)
+        if body_height == 0:
+            body_height = hi * 0.0001
+        rect = mpatches.Rectangle(
+            (x - 0.4, body_bottom),
+            0.8, body_height,
+            facecolor=color, edgecolor=color,
+            linewidth=0.5, zorder=3
+        )
+        ax.add_patch(rect)
 
     # --- STRUCTURES ---
     for s in structures:
         if s["end"] < zoom_start:
             continue
-        x_full    = np.arange(n)
-        line_high = np.array([line_value(s["s_high"], s["int_high"], i) for i in range(n)])
-        line_low  = np.array([line_value(s["s_low"],  s["int_low"],  i) for i in range(n)])
-        mask = (x_full >= max(s["start"], zoom_start)) & (x_full <= s["end"])
-        lh = np.where(mask, line_high, np.nan)[zoom_start:]
-        ll = np.where(mask, line_low,  np.nan)[zoom_start:]
+        x_start   = max(s["start"], zoom_start) - zoom_start
+        x_end_s   = min(s["end"], n - 1) - zoom_start
+        idx_range = np.arange(max(s["start"], zoom_start), min(s["end"], n - 1) + 1)
+        x_range   = idx_range - zoom_start
+
+        lh = np.array([line_value(s["s_high"], s["int_high"], i) for i in idx_range])
+        ll = np.array([line_value(s["s_low"],  s["int_low"],  i) for i in idx_range])
+
         color_h = "#333355" if s["broken"] else "#ff4444"
         color_l = "#333355" if s["broken"] else "#00ff88"
         lw      = 1.0       if s["broken"] else 2.0
-        add_plots.append(mpf.make_addplot(lh, color=color_h, linewidth=lw))
-        add_plots.append(mpf.make_addplot(ll, color=color_l, linewidth=lw))
+        alpha   = 0.4       if s["broken"] else 1.0
 
-    # --- SIGNAUX ---
-    for sig in signals:
-        idx   = sig["idx"]
-        width = min(idx + max(30, int((n - idx) * 0.15)), n - 1)
-        if width < zoom_start:
-            continue
-        tp_line = np.full(n, np.nan)
-        sl_line = np.full(n, np.nan)
-        en_line = np.full(n, np.nan)
-        tp_line[idx:width] = sig["tp"]
-        sl_line[idx:width] = sig["sl"]
-        en_line[idx:width] = sig["entry"]
-        if sig["idx"] < zoom_start:
-            color_tp = "#444444"
-            color_sl = "#444444"
-            color_en = "#666666"
-        else:
-            color_tp = "#00ff88"
-            color_sl = "#ff2222"
-            color_en = "#ffffff"
-        add_plots.append(mpf.make_addplot(tp_line[zoom_start:], color=color_tp, linewidth=1.5))
-        add_plots.append(mpf.make_addplot(sl_line[zoom_start:], color=color_sl, linewidth=1.5))
-        add_plots.append(mpf.make_addplot(en_line[zoom_start:], color=color_en, linewidth=1.2))
+        ax.plot(x_range, lh, color=color_h, linewidth=lw, alpha=alpha, zorder=4)
+        ax.plot(x_range, ll, color=color_l, linewidth=lw, alpha=alpha, zorder=4)
+
+        if not s["broken"]:
+            ax.fill_between(x_range, ll, lh,
+                            color="#1a3a2a", alpha=0.10, zorder=1)
+            ax.fill_between(x_range, lh, lh + s["zone_high"],
+                            color="#ff4444", alpha=0.10, zorder=1)
+            ax.fill_between(x_range, ll - s["zone_low"], ll,
+                            color="#00ff88", alpha=0.10, zorder=1)
 
     # --- ZIGZAG ---
     for s in structures:
@@ -415,26 +405,66 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
                     filtered[-1] = p
                 elif p["type"] == "LOW" and p["price"] < filtered[-1]["price"]:
                     filtered[-1] = p
-        zz_line = np.full(n, np.nan)
-        for p in filtered:
-            if p["idx"] >= zoom_start:
-                zz_line[p["idx"]] = p["price"]
-        if any(~np.isnan(zz_line[zoom_start:])):
-            add_plots.append(mpf.make_addplot(
-                zz_line[zoom_start:], color="#00aaff", linewidth=1.0
-            ))
 
-    fig, axes = mpf.plot(
-        df_zoom,
-        type      = "candle",
-        style     = style,
-        addplot   = add_plots if add_plots else None,
-        volume    = True,
-        figsize   = (16, 8),
-        returnfig = True,
-    )
-    axes[0].set_title("TRADAMAR — Analyse PATRAD",
-                      color="#00ff88", fontsize=13, pad=10)
+        for m in range(len(filtered) - 1):
+            p1 = filtered[m]
+            p2 = filtered[m + 1]
+            if p1["idx"] >= zoom_start and p2["idx"] >= zoom_start:
+                ax.plot(
+                    [p1["idx"] - zoom_start, p2["idx"] - zoom_start],
+                    [p1["price"], p2["price"]],
+                    color="#00aaff", linewidth=1.0, alpha=0.7, zorder=4
+                )
+
+    # --- SIGNAUX ---
+    for sig in signals:
+        idx   = sig["idx"]
+        x_sig = max(idx, zoom_start) - zoom_start
+        width = min(30, n - zoom_start - x_sig)
+        x_end = x_sig + width
+
+        if width <= 0:
+            continue
+
+        if idx < zoom_start:
+            color_tp = "#444444"
+            color_sl = "#444444"
+            color_en = "#666666"
+        else:
+            color_tp = "#00ff88"
+            color_sl = "#ff2222"
+            color_en = "#ffffff"
+
+        ax.hlines(sig["tp"],    x_sig, x_end, colors=color_tp,
+                  linewidth=1.5, linestyle="--", zorder=5)
+        ax.hlines(sig["entry"], x_sig, x_end, colors=color_en,
+                  linewidth=1.5, zorder=5)
+        ax.hlines(sig["sl"],    x_sig, x_end, colors=color_sl,
+                  linewidth=1.5, linestyle="--", zorder=5)
+
+        ax.fill_between(range(x_sig, x_end), sig["entry"], sig["tp"],
+                        color=color_tp, alpha=0.06, zorder=1)
+        ax.fill_between(range(x_sig, x_end), sig["sl"], sig["entry"],
+                        color=color_sl, alpha=0.06, zorder=1)
+
+        if idx >= zoom_start:
+            ax.text(x_end + 1, sig["tp"],
+                    f"TP {sig['tp']:.2f}",
+                    color=color_tp, fontsize=7, va="center")
+            ax.text(x_end + 1, sig["entry"],
+                    f"{sig['direction']} {sig['entry']:.2f}",
+                    color=color_en, fontsize=7, va="center", fontweight="bold")
+            ax.text(x_end + 1, sig["sl"],
+                    f"SL {sig['sl']:.2f}",
+                    color=color_sl, fontsize=7, va="center")
+
+    # --- STYLE ---
+    ax.tick_params(colors=text_color)
+    ax.spines[["top", "right", "left", "bottom"]].set_edgecolor(grid_color)
+    ax.grid(color=grid_color, linestyle="--", linewidth=0.5, alpha=0.5)
+    ax.set_title("TRADAMAR — Analyse PATRAD",
+                 color="#00ff88", fontsize=13, pad=10)
+    plt.tight_layout()
     return fig
 
 # ============================================================
