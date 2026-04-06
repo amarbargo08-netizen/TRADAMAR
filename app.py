@@ -426,13 +426,12 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
 
     fig, axes = mpf.plot(
         df_zoom,
-        type         = "candle",
-        style        = style,
-        addplot      = add_plots if add_plots else None,
-        volume       = True,
-        figsize      = (16, 8),
-        returnfig    = True,
-        tight_layout = True,
+        type      = "candle",
+        style     = style,
+        addplot   = add_plots if add_plots else None,
+        volume    = True,
+        figsize   = (16, 8),
+        returnfig = True,
     )
     axes[0].set_title("TRADAMAR — Analyse PATRAD",
                       color="#00ff88", fontsize=13, pad=10)
