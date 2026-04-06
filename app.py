@@ -95,9 +95,9 @@ ACTIFS = {
     "GC=F"     : "Gold",
 }
 
-INTERVAL   = "1h"
-PERIOD     = "180d"
-WINDOW     = 10
+INTERVAL     = "1h"
+PERIOD       = "180d"
+WINDOW       = 10
 ZOOM_BOUGIES = 100
 
 # ============================================================
@@ -204,8 +204,6 @@ def detect_structures(df, high_idx, low_idx, min_points=3, break_tol=0.002):
                 break
             j += 1
 
-        # --- IDENTIFIER LE TYPE DE PATTERN ---
-        slope_diff = abs(s_high - s_low)
         if abs(s_high) < 0.001 and abs(s_low) < 0.001:
             pattern = "Range horizontal"
         elif s_high > 0.001 and s_low > 0.001:
@@ -280,7 +278,7 @@ def detect_breakouts(structures, prices, confirm_factor=0.2):
     return breakouts
 
 def generate_signals(breakouts, prices, rr_ratio=2.0, rr_wide=1.5):
-    all_zones    = []
+    all_zones = []
     for b in breakouts:
         all_zones.append(b["structure"]["zone_high"])
         all_zones.append(b["structure"]["zone_low"])
@@ -325,7 +323,6 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
     lows   = df["Low"].values
     n      = len(prices)
 
-    # Zoom sur les dernières bougies
     zoom_start = max(0, n - zoom)
     df_zoom    = df.iloc[zoom_start:]
 
@@ -334,10 +331,10 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
     edge_color = "#1a2a5e" if dark else "#cccccc"
 
     mc = mpf.make_marketcolors(
-        up   = "#00ff88",
-        down = "#ff4444",
-        edge = "inherit",
-        wick = "inherit",
+        up     = "#00ff88",
+        down   = "#ff4444",
+        edge   = "inherit",
+        wick   = "inherit",
         volume = {"up": "#00ff88", "down": "#ff4444"}
     )
     style = mpf.make_mpf_style(
@@ -362,62 +359,50 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
     for s in structures:
         if s["end"] < zoom_start:
             continue
-
-        x_full     = np.arange(n)
-        line_high  = np.array([line_value(s["s_high"], s["int_high"], i) for i in range(n)])
-        line_low   = np.array([line_value(s["s_low"],  s["int_low"],  i) for i in range(n)])
-
+        x_full    = np.arange(n)
+        line_high = np.array([line_value(s["s_high"], s["int_high"], i) for i in range(n)])
+        line_low  = np.array([line_value(s["s_low"],  s["int_low"],  i) for i in range(n)])
         mask = (x_full >= max(s["start"], zoom_start)) & (x_full <= s["end"])
-
         lh = np.where(mask, line_high, np.nan)[zoom_start:]
         ll = np.where(mask, line_low,  np.nan)[zoom_start:]
-
         color_h = "#333355" if s["broken"] else "#ff4444"
         color_l = "#333355" if s["broken"] else "#00ff88"
-        lstyle  = "--"      if s["broken"] else "-"
         lw      = 1.0       if s["broken"] else 2.0
-
-        add_plots.append(mpf.make_addplot(lh, color=color_h, linewidth=lw, linestyle=lstyle))
-        add_plots.append(mpf.make_addplot(ll, color=color_l, linewidth=lw, linestyle=lstyle))
+        add_plots.append(mpf.make_addplot(lh, color=color_h, linewidth=lw))
+        add_plots.append(mpf.make_addplot(ll, color=color_l, linewidth=lw))
 
     # --- SIGNAUX ---
     for sig in signals:
+        idx   = sig["idx"]
+        width = min(idx + max(30, int((n - idx) * 0.15)), n - 1)
+        if width < zoom_start:
+            continue
+        tp_line = np.full(n, np.nan)
+        sl_line = np.full(n, np.nan)
+        en_line = np.full(n, np.nan)
+        tp_line[idx:width] = sig["tp"]
+        sl_line[idx:width] = sig["sl"]
+        en_line[idx:width] = sig["entry"]
         if sig["idx"] < zoom_start:
-            # Signal passé → grisé
-            idx   = sig["idx"]
-            width = min(idx + 30, n - 1)
-            if width < zoom_start:
-                continue
             color_tp = "#444444"
             color_sl = "#444444"
             color_en = "#666666"
         else:
-            # Signal actuel → couleurs vives
             color_tp = "#00ff88"
             color_sl = "#ff2222"
             color_en = "#ffffff"
-
-        idx   = sig["idx"]
-        width = min(idx + max(30, int((n - idx) * 0.15)), n - 1)
-
-        tp_line = np.full(n, np.nan)
-        sl_line = np.full(n, np.nan)
-        en_line = np.full(n, np.nan)
-
-        tp_line[idx:width] = sig["tp"]
-        sl_line[idx:width] = sig["sl"]
-        en_line[idx:width] = sig["entry"]
-
-        add_plots.append(mpf.make_addplot(tp_line[zoom_start:], color=color_tp, linewidth=1.5, linestyle="--"))
-        add_plots.append(mpf.make_addplot(sl_line[zoom_start:], color=color_sl, linewidth=1.5, linestyle="--"))
+        add_plots.append(mpf.make_addplot(tp_line[zoom_start:], color=color_tp, linewidth=1.5))
+        add_plots.append(mpf.make_addplot(sl_line[zoom_start:], color=color_sl, linewidth=1.5))
         add_plots.append(mpf.make_addplot(en_line[zoom_start:], color=color_en, linewidth=1.2))
 
     # --- ZIGZAG ---
     for s in structures:
         if s["end"] < zoom_start:
             continue
-        points_high = [{"idx": i, "price": highs[i], "type": "HIGH"} for i in high_idx if s["start"] <= i <= s["end"]]
-        points_low  = [{"idx": i, "price": lows[i],  "type": "LOW"}  for i in low_idx  if s["start"] <= i <= s["end"]]
+        points_high = [{"idx": i, "price": highs[i], "type": "HIGH"}
+                       for i in high_idx if s["start"] <= i <= s["end"]]
+        points_low  = [{"idx": i, "price": lows[i],  "type": "LOW"}
+                       for i in low_idx  if s["start"] <= i <= s["end"]]
         all_points  = sorted(points_high + points_low, key=lambda x: x["idx"])
         filtered    = []
         for p in all_points:
@@ -430,16 +415,13 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
                     filtered[-1] = p
                 elif p["type"] == "LOW" and p["price"] < filtered[-1]["price"]:
                     filtered[-1] = p
-
         zz_line = np.full(n, np.nan)
         for p in filtered:
             if p["idx"] >= zoom_start:
                 zz_line[p["idx"]] = p["price"]
-
         if any(~np.isnan(zz_line[zoom_start:])):
             add_plots.append(mpf.make_addplot(
-                zz_line[zoom_start:], color="#00aaff",
-                linewidth=1.0, linestyle="-"
+                zz_line[zoom_start:], color="#00aaff", linewidth=1.0
             ))
 
     fig, axes = mpf.plot(
@@ -452,17 +434,14 @@ def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=1
         returnfig    = True,
         tight_layout = True,
     )
-
     axes[0].set_title("TRADAMAR — Analyse PATRAD",
                       color="#00ff88", fontsize=13, pad=10)
-
     return fig
 
 # ============================================================
 # INTERFACE STREAMLIT
 # ============================================================
 
-# --- HEADER ---
 st.markdown(f"""
 <div style='text-align:center; padding: 10px 0;'>
     <h1 style='color:#00ff88; font-size:2.5rem; letter-spacing:4px;'>
@@ -474,7 +453,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- NAVIGATION ---
 tab1, tab2, tab3 = st.tabs(["🔴 LIVE", "🗂️ Archives", "⚙️ Paramètres"])
 
 # ============================================================
@@ -503,30 +481,29 @@ with tab1:
             breakouts         = detect_breakouts(structures, prices)
             signals           = generate_signals(breakouts, prices)
 
-            # --- GRAPHIQUE ---
             fig = generate_chart(df, structures, signals,
                                  high_idx, low_idx,
                                  dark=DARK, zoom=ZOOM_BOUGIES)
             st.pyplot(fig)
-
             st.markdown("---")
 
-            # --- ZONE PATRAD + INTRAD ---
             col1, col2 = st.columns(2)
 
             with col1:
                 st.markdown(f"""
                 <div class='info-box'>
                     <h3 style='color:#00ff88; margin:0;'>📊 PATRAD</h3>
-                    <p style='color:#00aaff; font-size:0.8rem;'>
-                        Analyse Price Action
-                    </p>
+                    <p style='color:#00aaff; font-size:0.8rem;'>Analyse Price Action</p>
                 </div>
                 """, unsafe_allow_html=True)
 
                 if structures:
-                    last_s = structures[-1]
-                    # Direction
+                    last_s    = structures[-1]
+                    last_idx  = last_s["end"]
+                    res_level = line_value(last_s["s_high"], last_s["int_high"], last_idx)
+                    sup_level = line_value(last_s["s_low"],  last_s["int_low"],  last_idx)
+                    zone_key  = (res_level + sup_level) / 2
+
                     if breakouts:
                         direction = breakouts[-1]["direction"]
                         dir_color = "#00ff88" if direction == "Haussière" else "#ff4444"
@@ -535,12 +512,6 @@ with tab1:
                         direction = "En attente"
                         dir_color = "#00aaff"
                         dir_icon  = "⏳"
-
-                    # Niveaux clés
-                    last_idx  = last_s["end"]
-                    res_level = line_value(last_s["s_high"], last_s["int_high"], last_idx)
-                    sup_level = line_value(last_s["s_low"],  last_s["int_low"],  last_idx)
-                    zone_key  = (res_level + sup_level) / 2
 
                     st.markdown(f"""
                     <div style='background:{BG_SEC}; padding:15px; border-radius:10px;
@@ -556,14 +527,17 @@ with tab1:
                         </p>
                         <hr style='border-color:#1a2a5e;'>
                         <p style='color:#aaaaaa; margin:2px;'>Résistance</p>
-                        <p style='color:#ff4444; font-size:1rem;
-                                  margin:2px;'>{res_level:.2f}</p>
+                        <p style='color:#ff4444; font-size:1rem; margin:2px;'>
+                            {res_level:.2f}
+                        </p>
                         <p style='color:#aaaaaa; margin:2px;'>Support</p>
-                        <p style='color:#00ff88; font-size:1rem;
-                                  margin:2px;'>{sup_level:.2f}</p>
+                        <p style='color:#00ff88; font-size:1rem; margin:2px;'>
+                            {sup_level:.2f}
+                        </p>
                         <p style='color:#aaaaaa; margin:2px;'>Zone clé</p>
-                        <p style='color:#00aaff; font-size:1rem;
-                                  margin:2px;'>{zone_key:.2f}</p>
+                        <p style='color:#00aaff; font-size:1rem; margin:2px;'>
+                            {zone_key:.2f}
+                        </p>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -586,15 +560,12 @@ with tab1:
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
-
                 st.markdown(f"""
                 <div style='background:{BG_SEC}; padding:15px; border-radius:10px;
                             border:1px solid #1a2a5e; text-align:center;'>
                     <p style='color:#555555; font-size:2rem;'>🔧</p>
                     <p style='color:#555555;'>Module en développement</p>
-                    <p style='color:#333366; font-size:0.8rem;'>
-                        Bientôt disponible
-                    </p>
+                    <p style='color:#333366; font-size:0.8rem;'>Bientôt disponible</p>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -621,7 +592,6 @@ with tab3:
     </div>
     """, unsafe_allow_html=True)
 
-    # Thème
     st.markdown(f"<p style='color:{TEXT};'><b>🎨 Thème :</b></p>",
                 unsafe_allow_html=True)
     theme_choice = st.radio(
@@ -636,19 +606,14 @@ with tab3:
         st.rerun()
 
     st.markdown("---")
-
-    # Timeframe
     st.markdown(f"<p style='color:{TEXT};'><b>⏱️ Timeframe :</b></p>",
                 unsafe_allow_html=True)
     timeframe = st.selectbox(
-        "Intervalle",
-        ["1h", "4h", "1d"],
+        "Intervalle", ["1h", "4h", "1d"],
         label_visibility="collapsed"
     )
 
     st.markdown("---")
-
-    # Actifs
     st.markdown(f"<p style='color:{TEXT};'><b>📊 Actifs surveillés :</b></p>",
                 unsafe_allow_html=True)
     cols = st.columns(2)
@@ -657,8 +622,6 @@ with tab3:
             st.checkbox(nom, value=True, key=f"actif_{symbol_key}")
 
     st.markdown("---")
-
-    # À propos
     st.markdown(f"""
     <div style='background:{BG_SEC}; padding:15px; border-radius:10px;
                 border:1px solid #1a2a5e; text-align:center;'>
