@@ -1,0 +1,675 @@
+# ============================================================
+# TRADAMAR - APPLICATION STREAMLIT
+# ============================================================
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import mplfinance as mpf
+from scipy.stats import linregress
+from scipy.signal import argrelextrema
+
+# --- CONFIGURATION PAGE ---
+st.set_page_config(
+    page_title="TRADAMAR",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# --- THÈME ---
+if "theme" not in st.session_state:
+    st.session_state.theme = "sombre"
+
+DARK = st.session_state.theme == "sombre"
+
+# --- COULEURS ---
+BG_MAIN  = "#0a0f2c" if DARK else "#f0f4ff"
+BG_SEC   = "#0d1b3e" if DARK else "#ffffff"
+ACCENT   = "#00ff88"
+BLUE_NEO = "#00aaff"
+TEXT     = "#ffffff"  if DARK else "#0a0f2c"
+TEXT_SEC = "#00aaff"
+
+# --- STYLE CSS ---
+st.markdown(f"""
+<style>
+    .stApp {{ background-color: {BG_MAIN}; }}
+    .block-container {{ padding: 1rem; }}
+    h1, h2, h3 {{ color: {ACCENT} !important; }}
+    p, label, div {{ color: {TEXT} !important; }}
+    .stTabs [data-baseweb="tab"] {{
+        color: {TEXT_SEC};
+        border-bottom: 2px solid {ACCENT};
+    }}
+    .stTabs [aria-selected="true"] {{
+        color: {ACCENT} !important;
+        border-bottom: 3px solid {ACCENT} !important;
+    }}
+    .stSelectbox label {{ color: {TEXT} !important; }}
+    .stMetric label {{ color: {TEXT_SEC} !important; }}
+    .stMetric div {{ color: {ACCENT} !important; font-size: 1.2rem !important; }}
+    .stButton button {{
+        background-color: {ACCENT};
+        color: {BG_MAIN};
+        border: none;
+        font-weight: bold;
+        border-radius: 8px;
+    }}
+    .stButton button:hover {{
+        background-color: {BLUE_NEO};
+        color: white;
+    }}
+    .info-box {{
+        background-color: {BG_SEC};
+        border: 1px solid {BLUE_NEO};
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+    }}
+    .warning-box {{
+        background-color: {BG_SEC};
+        border: 1px solid #ff8800;
+        border-radius: 10px;
+        padding: 10px;
+        margin: 10px 0;
+        color: #ff8800 !important;
+    }}
+</style>
+""", unsafe_allow_html=True)
+
+# --- LISTE DES ACTIFS ---
+ACTIFS = {
+    "BTC-USD"  : "Bitcoin",
+    "ETH-USD"  : "Ethereum",
+    "GBPJPY=X" : "GBP/JPY",
+    "AUDCAD=X" : "AUD/CAD",
+    "AUDUSD=X" : "AUD/USD",
+    "SI=F"     : "Silver",
+    "GBPUSD=X" : "GBP/USD",
+    "USDJPY=X" : "USD/JPY",
+    "EURUSD=X" : "EUR/USD",
+    "GC=F"     : "Gold",
+}
+
+INTERVAL   = "1h"
+PERIOD     = "180d"
+WINDOW     = 10
+ZOOM_BOUGIES = 100
+
+# ============================================================
+# FONCTIONS DU PIPELINE
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def load_data(symbol, interval, period):
+    df = yf.download(symbol, interval=interval, period=period)
+    df.columns = df.columns.droplevel(1)
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+    df.dropna(inplace=True)
+    return df
+
+def detect_points(df, window=10):
+    high_idx = argrelextrema(df["High"].values, np.greater_equal, order=window)[0]
+    low_idx  = argrelextrema(df["Low"].values,  np.less_equal,    order=window)[0]
+    return high_idx, low_idx
+
+def calc_regression(indices, values, outlier_threshold=1.5):
+    indices = np.array(indices)
+    values  = np.array(values)
+    slope, intercept, r, p, se = linregress(indices, values)
+    predicted = slope * indices + intercept
+    distances = np.abs(values - predicted)
+    mean_dist = np.mean(distances)
+    mask = distances <= outlier_threshold * mean_dist
+    if mask.sum() >= 2:
+        slope, intercept, r, p, se = linregress(indices[mask], values[mask])
+    return slope, intercept, r**2
+
+def line_value(slope, intercept, idx):
+    return slope * idx + intercept
+
+def lines_cross_in_past(s_high, i_high, s_low, i_low, start, end):
+    for idx in range(start, end):
+        if line_value(s_low, i_low, idx) >= line_value(s_high, i_high, idx):
+            return True
+    return False
+
+def validate_structure(s_high, int_high, s_low, int_low, start_idx, end_idx):
+    dist_debut = line_value(s_high, int_high, start_idx) - line_value(s_low, int_low, start_idx)
+    dist_fin   = line_value(s_high, int_high, end_idx)   - line_value(s_low, int_low, end_idx)
+    if dist_debut <= 0 or dist_fin <= 0:
+        return False
+    if dist_fin > dist_debut * 2:
+        return False
+    duree      = max(end_idx - start_idx, 1)
+    projection = end_idx + duree * 2
+    for idx in range(end_idx, int(projection)):
+        val_high = line_value(s_high, int_high, idx)
+        val_low  = line_value(s_low,  int_low,  idx)
+        if val_low >= val_high:
+            if idx - end_idx < duree:
+                return False
+            break
+    seuil_pente = (dist_debut / duree) * 0.5
+    if s_high > seuil_pente and s_low < -seuil_pente:
+        return False
+    if s_high < -seuil_pente and s_low > seuil_pente:
+        return False
+    return True
+
+def detect_structures(df, high_idx, low_idx, min_points=3, break_tol=0.002):
+    structures = []
+    prices = df["Close"].values
+    highs  = df["High"].values
+    lows   = df["Low"].values
+    n      = len(prices)
+    h_idx  = list(high_idx)
+    l_idx  = list(low_idx)
+    i      = 0
+    while i < len(h_idx) - min_points + 1:
+        h_group = h_idx[i:i + min_points]
+        first_high_pos   = h_group[0]
+        l_group_filtered = [idx for idx in l_idx if idx >= first_high_pos]
+        if len(l_group_filtered) < min_points:
+            i += 1
+            continue
+        l_group   = l_group_filtered[:min_points]
+        s_high, int_high, r2_high = calc_regression(h_group, highs[h_group])
+        s_low,  int_low,  r2_low  = calc_regression(l_group, lows[l_group])
+        start_idx = min(h_group[0], l_group[0])
+        end_idx   = max(h_group[-1], l_group[-1])
+        if lines_cross_in_past(s_high, int_high, s_low, int_low, start_idx, end_idx):
+            i += 1
+            continue
+        if not validate_structure(s_high, int_high, s_low, int_low, start_idx, end_idx):
+            i += 1
+            continue
+        j         = end_idx + 1
+        broken    = False
+        break_idx = None
+        while j < n:
+            val_high = line_value(s_high, int_high, j)
+            val_low  = line_value(s_low,  int_low,  j)
+            if prices[j] > val_high * (1 + break_tol):
+                broken    = True
+                break_idx = j
+                break
+            if prices[j] < val_low * (1 - break_tol):
+                broken    = True
+                break_idx = j
+                break
+            j += 1
+
+        # --- IDENTIFIER LE TYPE DE PATTERN ---
+        slope_diff = abs(s_high - s_low)
+        if abs(s_high) < 0.001 and abs(s_low) < 0.001:
+            pattern = "Range horizontal"
+        elif s_high > 0.001 and s_low > 0.001:
+            pattern = "Canal ascendant"
+        elif s_high < -0.001 and s_low < -0.001:
+            pattern = "Canal descendant"
+        elif s_high < -0.001 and s_low > 0.001:
+            pattern = "Triangle symétrique"
+        elif abs(s_high) < 0.001 and s_low > 0.001:
+            pattern = "Triangle ascendant"
+        elif s_high < -0.001 and abs(s_low) < 0.001:
+            pattern = "Triangle descendant"
+        else:
+            pattern = "Canal"
+
+        structures.append({
+            "start"    : start_idx,
+            "end"      : break_idx if break_idx else j,
+            "s_high"   : s_high,
+            "int_high" : int_high,
+            "s_low"    : s_low,
+            "int_low"  : int_low,
+            "r2_high"  : r2_high,
+            "r2_low"   : r2_low,
+            "broken"   : broken,
+            "break_idx": break_idx,
+            "pattern"  : pattern
+        })
+        if broken and break_idx:
+            i = next((k for k, idx in enumerate(h_idx) if idx >= break_idx), len(h_idx))
+        else:
+            break
+    return structures
+
+def calc_zones(structures, high_idx, low_idx, highs, lows, prices):
+    ZONE_FACTOR  = 1.2
+    ZONE_MAX_PCT = 0.015
+    for s in structures:
+        h_group    = [idx for idx in high_idx if s["start"] <= idx <= s["end"]]
+        l_group    = [idx for idx in low_idx  if s["start"] <= idx <= s["end"]]
+        prix_moyen = np.mean(prices[s["start"]:s["end"]])
+        def thickness(indices, values, slope, intercept):
+            indices   = np.array(indices)
+            values    = np.array(values)
+            predicted = slope * indices + intercept
+            distances = np.abs(values - predicted)
+            mean_d    = np.mean(distances)
+            mask      = distances <= mean_d * 1.5
+            if mask.sum() >= 2:
+                distances = distances[mask]
+            return min(np.mean(distances) * ZONE_FACTOR, prix_moyen * ZONE_MAX_PCT)
+        s["zone_high"] = thickness(h_group, highs[h_group], s["s_high"], s["int_high"]) if len(h_group) >= 2 else 0
+        s["zone_low"]  = thickness(l_group, lows[l_group],  s["s_low"],  s["int_low"])  if len(l_group) >= 2 else 0
+    return structures
+
+def detect_breakouts(structures, prices, confirm_factor=0.2):
+    breakouts = []
+    for s in structures:
+        if s["broken"] and s["break_idx"]:
+            j         = s["break_idx"]
+            line_high = line_value(s["s_high"], s["int_high"], j)
+            line_low  = line_value(s["s_low"],  s["int_low"],  j)
+            close     = prices[j]
+            mid       = (line_high + line_low) / 2
+            btype     = "Haussière" if close > mid else "Baissière"
+            breakouts.append({
+                "idx"      : j,
+                "direction": btype,
+                "price"    : close,
+                "structure": s,
+            })
+    return breakouts
+
+def generate_signals(breakouts, prices, rr_ratio=2.0, rr_wide=1.5):
+    all_zones    = []
+    for b in breakouts:
+        all_zones.append(b["structure"]["zone_high"])
+        all_zones.append(b["structure"]["zone_low"])
+    zone_plafond = np.median(all_zones) * 1.2 if all_zones else 0
+    signals = []
+    for b in breakouts:
+        s     = b["structure"]
+        idx   = b["idx"]
+        entry = b["price"]
+        line_high = line_value(s["s_high"], s["int_high"], idx)
+        line_low  = line_value(s["s_low"],  s["int_low"],  idx)
+        if b["direction"] == "Haussière":
+            zone_utilisee = min(s["zone_high"], zone_plafond)
+            rr_utilise    = rr_wide if s["zone_high"] > zone_plafond else rr_ratio
+            sl   = line_high - zone_utilisee
+            risk = entry - sl
+            tp   = entry + (risk * rr_utilise)
+        else:
+            zone_utilisee = min(s["zone_low"], zone_plafond)
+            rr_utilise    = rr_wide if s["zone_low"] > zone_plafond else rr_ratio
+            sl   = line_low + zone_utilisee
+            risk = sl - entry
+            tp   = entry - (risk * rr_utilise)
+        rr = round(abs(tp - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0
+        signals.append({
+            "idx"      : idx,
+            "direction": b["direction"],
+            "entry"    : round(entry, 2),
+            "sl"       : round(sl,    2),
+            "tp"       : round(tp,    2),
+            "rr"       : rr,
+            "pattern"  : s["pattern"],
+            "is_last"  : False
+        })
+    if signals:
+        signals[-1]["is_last"] = True
+    return signals
+
+def generate_chart(df, structures, signals, high_idx, low_idx, dark=True, zoom=100):
+    prices = df["Close"].values
+    highs  = df["High"].values
+    lows   = df["Low"].values
+    n      = len(prices)
+
+    # Zoom sur les dernières bougies
+    zoom_start = max(0, n - zoom)
+    df_zoom    = df.iloc[zoom_start:]
+
+    bg_color   = "#0a0f2c" if dark else "#f0f4ff"
+    text_color = "white"   if dark else "#0a0f2c"
+    edge_color = "#1a2a5e" if dark else "#cccccc"
+
+    mc = mpf.make_marketcolors(
+        up   = "#00ff88",
+        down = "#ff4444",
+        edge = "inherit",
+        wick = "inherit",
+        volume = {"up": "#00ff88", "down": "#ff4444"}
+    )
+    style = mpf.make_mpf_style(
+        marketcolors = mc,
+        facecolor    = bg_color,
+        edgecolor    = edge_color,
+        figcolor     = bg_color,
+        gridcolor    = "#1a2a5e",
+        gridstyle    = "--",
+        gridaxis     = "both",
+        y_on_right   = True,
+        rc           = {
+            "axes.labelcolor" : text_color,
+            "xtick.color"     : text_color,
+            "ytick.color"     : text_color,
+        }
+    )
+
+    add_plots = []
+
+    # --- STRUCTURES ---
+    for s in structures:
+        if s["end"] < zoom_start:
+            continue
+
+        x_full     = np.arange(n)
+        line_high  = np.array([line_value(s["s_high"], s["int_high"], i) for i in range(n)])
+        line_low   = np.array([line_value(s["s_low"],  s["int_low"],  i) for i in range(n)])
+
+        mask = (x_full >= max(s["start"], zoom_start)) & (x_full <= s["end"])
+
+        lh = np.where(mask, line_high, np.nan)[zoom_start:]
+        ll = np.where(mask, line_low,  np.nan)[zoom_start:]
+
+        color_h = "#333355" if s["broken"] else "#ff4444"
+        color_l = "#333355" if s["broken"] else "#00ff88"
+        lstyle  = "--"      if s["broken"] else "-"
+        lw      = 1.0       if s["broken"] else 2.0
+
+        add_plots.append(mpf.make_addplot(lh, color=color_h, linewidth=lw, linestyle=lstyle))
+        add_plots.append(mpf.make_addplot(ll, color=color_l, linewidth=lw, linestyle=lstyle))
+
+    # --- SIGNAUX ---
+    for sig in signals:
+        if sig["idx"] < zoom_start:
+            # Signal passé → grisé
+            idx   = sig["idx"]
+            width = min(idx + 30, n - 1)
+            if width < zoom_start:
+                continue
+            color_tp = "#444444"
+            color_sl = "#444444"
+            color_en = "#666666"
+        else:
+            # Signal actuel → couleurs vives
+            color_tp = "#00ff88"
+            color_sl = "#ff2222"
+            color_en = "#ffffff"
+
+        idx   = sig["idx"]
+        width = min(idx + max(30, int((n - idx) * 0.15)), n - 1)
+
+        tp_line = np.full(n, np.nan)
+        sl_line = np.full(n, np.nan)
+        en_line = np.full(n, np.nan)
+
+        tp_line[idx:width] = sig["tp"]
+        sl_line[idx:width] = sig["sl"]
+        en_line[idx:width] = sig["entry"]
+
+        add_plots.append(mpf.make_addplot(tp_line[zoom_start:], color=color_tp, linewidth=1.5, linestyle="--"))
+        add_plots.append(mpf.make_addplot(sl_line[zoom_start:], color=color_sl, linewidth=1.5, linestyle="--"))
+        add_plots.append(mpf.make_addplot(en_line[zoom_start:], color=color_en, linewidth=1.2))
+
+    # --- ZIGZAG ---
+    for s in structures:
+        if s["end"] < zoom_start:
+            continue
+        points_high = [{"idx": i, "price": highs[i], "type": "HIGH"} for i in high_idx if s["start"] <= i <= s["end"]]
+        points_low  = [{"idx": i, "price": lows[i],  "type": "LOW"}  for i in low_idx  if s["start"] <= i <= s["end"]]
+        all_points  = sorted(points_high + points_low, key=lambda x: x["idx"])
+        filtered    = []
+        for p in all_points:
+            if not filtered:
+                filtered.append(p)
+            elif p["type"] != filtered[-1]["type"]:
+                filtered.append(p)
+            else:
+                if p["type"] == "HIGH" and p["price"] > filtered[-1]["price"]:
+                    filtered[-1] = p
+                elif p["type"] == "LOW" and p["price"] < filtered[-1]["price"]:
+                    filtered[-1] = p
+
+        zz_line = np.full(n, np.nan)
+        for p in filtered:
+            if p["idx"] >= zoom_start:
+                zz_line[p["idx"]] = p["price"]
+
+        if any(~np.isnan(zz_line[zoom_start:])):
+            add_plots.append(mpf.make_addplot(
+                zz_line[zoom_start:], color="#00aaff",
+                linewidth=1.0, linestyle="-"
+            ))
+
+    fig, axes = mpf.plot(
+        df_zoom,
+        type         = "candle",
+        style        = style,
+        addplot      = add_plots if add_plots else None,
+        volume       = True,
+        figsize      = (16, 8),
+        returnfig    = True,
+        tight_layout = True,
+    )
+
+    axes[0].set_title("TRADAMAR — Analyse PATRAD",
+                      color="#00ff88", fontsize=13, pad=10)
+
+    return fig
+
+# ============================================================
+# INTERFACE STREAMLIT
+# ============================================================
+
+# --- HEADER ---
+st.markdown(f"""
+<div style='text-align:center; padding: 10px 0;'>
+    <h1 style='color:#00ff88; font-size:2.5rem; letter-spacing:4px;'>
+        📈 TRADAMAR
+    </h1>
+    <p style='color:#00aaff; font-size:0.9rem;'>
+        Intelligence Artificielle d'Analyse Technique
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+# --- NAVIGATION ---
+tab1, tab2, tab3 = st.tabs(["🔴 LIVE", "🗂️ Archives", "⚙️ Paramètres"])
+
+# ============================================================
+# TAB LIVE
+# ============================================================
+with tab1:
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        symbole_nom = st.selectbox("", list(ACTIFS.values()),
+                                   label_visibility="collapsed")
+        symbol      = [k for k, v in ACTIFS.items() if v == symbole_nom][0]
+    with col2:
+        analyser = st.button("🔍 Analyser", use_container_width=True)
+
+    if analyser:
+        with st.spinner("⏳ Analyse en cours..."):
+
+            df                = load_data(symbol, INTERVAL, PERIOD)
+            prices            = df["Close"].values
+            highs             = df["High"].values
+            lows              = df["Low"].values
+            high_idx, low_idx = detect_points(df, WINDOW)
+            structures        = detect_structures(df, high_idx, low_idx)
+            structures        = calc_zones(structures, high_idx, low_idx, highs, lows, prices)
+            breakouts         = detect_breakouts(structures, prices)
+            signals           = generate_signals(breakouts, prices)
+
+            # --- GRAPHIQUE ---
+            fig = generate_chart(df, structures, signals,
+                                 high_idx, low_idx,
+                                 dark=DARK, zoom=ZOOM_BOUGIES)
+            st.pyplot(fig)
+
+            st.markdown("---")
+
+            # --- ZONE PATRAD + INTRAD ---
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown(f"""
+                <div class='info-box'>
+                    <h3 style='color:#00ff88; margin:0;'>📊 PATRAD</h3>
+                    <p style='color:#00aaff; font-size:0.8rem;'>
+                        Analyse Price Action
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if structures:
+                    last_s = structures[-1]
+                    # Direction
+                    if breakouts:
+                        direction = breakouts[-1]["direction"]
+                        dir_color = "#00ff88" if direction == "Haussière" else "#ff4444"
+                        dir_icon  = "📈" if direction == "Haussière" else "📉"
+                    else:
+                        direction = "En attente"
+                        dir_color = "#00aaff"
+                        dir_icon  = "⏳"
+
+                    # Niveaux clés
+                    last_idx  = last_s["end"]
+                    res_level = line_value(last_s["s_high"], last_s["int_high"], last_idx)
+                    sup_level = line_value(last_s["s_low"],  last_s["int_low"],  last_idx)
+                    zone_key  = (res_level + sup_level) / 2
+
+                    st.markdown(f"""
+                    <div style='background:{BG_SEC}; padding:15px; border-radius:10px;
+                                border:1px solid #1a2a5e;'>
+                        <p style='color:#aaaaaa; margin:2px;'>Pattern détecté</p>
+                        <p style='color:#00aaff; font-size:1.1rem; font-weight:bold;
+                                  margin:2px;'>{last_s['pattern']}</p>
+                        <hr style='border-color:#1a2a5e;'>
+                        <p style='color:#aaaaaa; margin:2px;'>Direction probable</p>
+                        <p style='color:{dir_color}; font-size:1.1rem;
+                                  font-weight:bold; margin:2px;'>
+                            {dir_icon} {direction}
+                        </p>
+                        <hr style='border-color:#1a2a5e;'>
+                        <p style='color:#aaaaaa; margin:2px;'>Résistance</p>
+                        <p style='color:#ff4444; font-size:1rem;
+                                  margin:2px;'>{res_level:.2f}</p>
+                        <p style='color:#aaaaaa; margin:2px;'>Support</p>
+                        <p style='color:#00ff88; font-size:1rem;
+                                  margin:2px;'>{sup_level:.2f}</p>
+                        <p style='color:#aaaaaa; margin:2px;'>Zone clé</p>
+                        <p style='color:#00aaff; font-size:1rem;
+                                  margin:2px;'>{zone_key:.2f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    st.markdown(f"""
+                    <div class='warning-box'>
+                        ⚠️ Analyse indicative uniquement.<br>
+                        Ne constitue pas un conseil financier.
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                else:
+                    st.warning("Aucune structure détectée.")
+
+            with col2:
+                st.markdown(f"""
+                <div class='info-box'>
+                    <h3 style='color:#00ff88; margin:0;'>🤖 INTRAD</h3>
+                    <p style='color:#00aaff; font-size:0.8rem;'>
+                        Analyse Indicateurs Techniques
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown(f"""
+                <div style='background:{BG_SEC}; padding:15px; border-radius:10px;
+                            border:1px solid #1a2a5e; text-align:center;'>
+                    <p style='color:#555555; font-size:2rem;'>🔧</p>
+                    <p style='color:#555555;'>Module en développement</p>
+                    <p style='color:#333366; font-size:0.8rem;'>
+                        Bientôt disponible
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+# ============================================================
+# TAB ARCHIVES
+# ============================================================
+with tab2:
+    st.markdown(f"""
+    <div class='info-box'>
+        <h3 style='color:#00ff88;'>🗂️ Archives</h3>
+        <p style='color:#00aaff;'>
+            Les 2 dernières analyses par actif seront affichées ici.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ============================================================
+# TAB PARAMÈTRES
+# ============================================================
+with tab3:
+    st.markdown(f"""
+    <div class='info-box'>
+        <h3 style='color:#00ff88;'>⚙️ Paramètres</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Thème
+    st.markdown(f"<p style='color:{TEXT};'><b>🎨 Thème :</b></p>",
+                unsafe_allow_html=True)
+    theme_choice = st.radio(
+        "Thème",
+        ["🌙 Sombre", "☀️ Clair"],
+        index=0 if DARK else 1,
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    if st.button("Appliquer le thème"):
+        st.session_state.theme = "sombre" if "Sombre" in theme_choice else "clair"
+        st.rerun()
+
+    st.markdown("---")
+
+    # Timeframe
+    st.markdown(f"<p style='color:{TEXT};'><b>⏱️ Timeframe :</b></p>",
+                unsafe_allow_html=True)
+    timeframe = st.selectbox(
+        "Intervalle",
+        ["1h", "4h", "1d"],
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+
+    # Actifs
+    st.markdown(f"<p style='color:{TEXT};'><b>📊 Actifs surveillés :</b></p>",
+                unsafe_allow_html=True)
+    cols = st.columns(2)
+    for i, (symbol_key, nom) in enumerate(ACTIFS.items()):
+        with cols[i % 2]:
+            st.checkbox(nom, value=True, key=f"actif_{symbol_key}")
+
+    st.markdown("---")
+
+    # À propos
+    st.markdown(f"""
+    <div style='background:{BG_SEC}; padding:15px; border-radius:10px;
+                border:1px solid #1a2a5e; text-align:center;'>
+        <p style='color:#00ff88; font-size:1.2rem; font-weight:bold;'>
+            TRADAMAR v1.0
+        </p>
+        <p style='color:#00aaff;'>
+            Intelligence Artificielle d'Analyse Technique
+        </p>
+        <p style='color:#555555; font-size:0.8rem;'>
+            © 2026 — Tous droits réservés
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
